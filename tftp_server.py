@@ -38,7 +38,8 @@ def _ensure_deps() -> None:
 _ensure_deps()
 
 import scapy.all as _scapy                          # noqa: E402
-from scapy.layers.inet import IP, UDP               # noqa: E402
+from scapy.layers.inet import IP, UDP, ICMP          # noqa: E402
+from scapy.layers.l2 import ARP, Ether              # noqa: E402
 from scapy.packet import Raw                         # noqa: E402
 
 from PyQt6.QtWidgets import (                        # noqa: E402
@@ -549,6 +550,22 @@ QPushButton#stopBtn:hover {
 QPushButton#browseBtn {
     padding: 4px 12px;
 }
+QPushButton#pingBtn {
+    background-color: #1c3a5e;
+    border-color: #3b82c4;
+    color: #89b4fa;
+    padding: 4px 10px;
+}
+QPushButton#pingBtn:hover { background-color: #3b82c4; }
+QPushButton#pingBtn:disabled { background-color: #1a1a2e; color: #45475a; border-color: #313244; }
+QPushButton#arpBtn {
+    background-color: #3b2a1a;
+    border-color: #c47d3b;
+    color: #fab387;
+    padding: 4px 10px;
+}
+QPushButton#arpBtn:hover { background-color: #c47d3b; }
+QPushButton#arpBtn:disabled { background-color: #1a1a2e; color: #45475a; border-color: #313244; }
 QTableWidget {
     background-color: #1e1e2e;
     alternate-background-color: #252536;
@@ -601,6 +618,8 @@ class MainWindow(QMainWindow):
         self._server: Optional[TFTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
         self._log_seen = 0
+        self._probe_messages: List[Tuple[str, str]] = []   # (color, html-line)
+        self._probe_lock = threading.Lock()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -637,7 +656,24 @@ class MainWindow(QMainWindow):
         sg.addWidget(QLabel("Client IP filter:"), 1, 2)
         self._client_ip = QLineEdit()
         self._client_ip.setPlaceholderText("(empty = accept any client)")
-        sg.addWidget(self._client_ip, 1, 3, 1, 2)
+        sg.addWidget(self._client_ip, 1, 3)
+
+        probe_layout = QHBoxLayout()
+        probe_layout.setSpacing(4)
+        probe_layout.setContentsMargins(0, 0, 0, 0)
+        self._ping_btn = QPushButton("Ping")
+        self._ping_btn.setObjectName("pingBtn")
+        self._ping_btn.setToolTip("Send ICMP echo request to Client IP")
+        self._ping_btn.clicked.connect(self._do_ping)
+        probe_layout.addWidget(self._ping_btn)
+        self._arp_btn = QPushButton("ARP")
+        self._arp_btn.setObjectName("arpBtn")
+        self._arp_btn.setToolTip("Send ARP who-has request to Client IP")
+        self._arp_btn.clicked.connect(self._do_arp)
+        probe_layout.addWidget(self._arp_btn)
+        probe_widget = QWidget()
+        probe_widget.setLayout(probe_layout)
+        sg.addWidget(probe_widget, 1, 4)
 
         # Row 2
         sg.addWidget(QLabel("Interface:"), 2, 0)
@@ -822,9 +858,103 @@ class MainWindow(QMainWindow):
                   self._delay_spin, self._timeout_spin, self._retries_spin):
             w.setEnabled(enabled)
 
+    # ── probe helpers ──
+
+    def _probe_log(self, color: str, line: str) -> None:
+        """Thread-safe append to probe message queue (drained by timer)."""
+        with self._probe_lock:
+            self._probe_messages.append((color, line))
+
+    def _get_probe_ip_and_iface(self):
+        """Return (client_ip, iface_or_None) or show warning and return (None, None)."""
+        ip = self._client_ip.text().strip()
+        if not ip:
+            QMessageBox.warning(self, "Client IP required",
+                                "Enter a Client IP address before probing.")
+            return None, None
+        iface = self._parse_iface_from_combo()
+        return ip, iface
+
+    def _do_ping(self) -> None:
+        ip, iface = self._get_probe_ip_and_iface()
+        if not ip:
+            return
+        self._ping_btn.setEnabled(False)
+        self._probe_log("#89b4fa", f"PING → {ip}  (ICMP echo, 4 packets) ...")
+
+        def _run():
+            try:
+                results = []
+                for seq in range(1, 5):
+                    pkt = IP(dst=ip) / ICMP(id=0x1234, seq=seq)
+                    t0 = time.monotonic()
+                    reply = _scapy.sr1(pkt, iface=iface, timeout=2, verbose=False)
+                    rtt = (time.monotonic() - t0) * 1000
+                    if reply is not None:
+                        results.append(rtt)
+                        self._probe_log("#a6e3a1",
+                                        f"  Reply from {reply[IP].src}  seq={seq}  ttl={reply[IP].ttl}  time={rtt:.1f} ms")
+                    else:
+                        self._probe_log("#f38ba8", f"  Request timeout  seq={seq}")
+
+                if results:
+                    avg = sum(results) / len(results)
+                    self._probe_log("#a6e3a1",
+                                    f"PING done: {len(results)}/4 replies  avg={avg:.1f} ms  min={min(results):.1f} ms  max={max(results):.1f} ms")
+                else:
+                    self._probe_log("#f38ba8", f"PING done: no replies from {ip}")
+            except Exception as exc:
+                self._probe_log("#f38ba8", f"PING error: {exc}")
+            finally:
+                # Re-enable button on main thread via timer
+                self._ping_btn.setEnabled(True)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _do_arp(self) -> None:
+        ip, iface = self._get_probe_ip_and_iface()
+        if not ip:
+            return
+        self._arp_btn.setEnabled(False)
+        self._probe_log("#fab387", f"ARP  → who has {ip}?  ...")
+
+        def _run():
+            try:
+                ans, unans = _scapy.arping(ip, iface=iface, timeout=2, verbose=False)
+                if ans:
+                    for sent, received in ans:
+                        mac = received[Ether].src
+                        src_ip = received[ARP].psrc
+                        self._probe_log("#a6e3a1",
+                                        f"  ARP reply: {src_ip} is at {mac}")
+                    self._probe_log("#a6e3a1",
+                                    f"ARP done: {len(ans)} host(s) responded")
+                else:
+                    self._probe_log("#f38ba8", f"ARP done: no reply from {ip}")
+            except Exception as exc:
+                self._probe_log("#f38ba8", f"ARP error: {exc}")
+            finally:
+                self._arp_btn.setEnabled(True)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── periodic refresh ──
 
     def _refresh_ui(self) -> None:
+        # drain probe messages regardless of server state
+        with self._probe_lock:
+            pending = self._probe_messages[:]
+            self._probe_messages.clear()
+        if pending:
+            cursor = self._log_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            for color, line in pending:
+                cursor.insertHtml(
+                    f'<span style="color:{color};">{_html_escape(line)}</span><br>'
+                )
+            self._log_text.setTextCursor(cursor)
+            self._log_text.ensureCursorVisible()
+
         if not self._server:
             return
 
