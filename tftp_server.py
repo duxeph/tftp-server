@@ -709,7 +709,7 @@ class ServerUI:
         lines = []
         for e in entries:
             sty    = _LEVEL_STYLE.get(e["level"], "white")
-            client = f" [dim]\[{e['client']}][/dim]" if e["client"] else ""
+            client = f" [dim]\\[{e['client']}][/dim]" if e["client"] else ""
             lines.append(
                 f"[dim]{e['ts']}[/dim] [{sty}]{e['level']:<5}[/{sty}]{client} {e['msg']}"
             )
