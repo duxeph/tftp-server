@@ -797,11 +797,30 @@ class MainWindow(QMainWindow):
         return text.split("(")[0].strip().split("[")[0].strip()
 
     def _parse_iface_from_combo(self) -> Optional[str]:
+        """Return the explicit interface selection, or None if auto-detect."""
         idx = self._iface_combo.currentIndex()
         if idx <= 0:
             return None
         text = self._iface_combo.currentText()
         return text.split("[")[0].strip()
+
+    def _resolve_probe_iface(self) -> Optional[str]:
+        """
+        Resolve which interface to use for Ping / ARP probes:
+          1. Explicit interface combo selection
+          2. Interface implied by Server IP combo (e.g. "192.168.1.10  (eth0)")
+          3. None — let Scapy pick its default
+        """
+        iface = self._parse_iface_from_combo()
+        if iface:
+            return iface
+        # Try to extract the iface name from the Server IP combo entry "(iface_name)"
+        text = self._server_ip.currentText()
+        if "(" in text and ")" in text:
+            candidate = text[text.rfind("(") + 1: text.rfind(")")].strip()
+            if candidate and candidate != "all interfaces":
+                return candidate
+        return None
 
     # ── slots ──
 
@@ -872,7 +891,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Client IP required",
                                 "Enter a Client IP address before probing.")
             return None, None
-        iface = self._parse_iface_from_combo()
+        iface = self._resolve_probe_iface()
         return ip, iface
 
     def _do_ping(self) -> None:
@@ -880,7 +899,7 @@ class MainWindow(QMainWindow):
         if not ip:
             return
         self._ping_btn.setEnabled(False)
-        self._probe_log("#89b4fa", f"PING → {ip}  (ICMP echo, 4 packets) ...")
+        self._probe_log("#89b4fa", f"PING → {ip}  iface={iface or 'auto'}  (ICMP echo, 4 packets) ...")
 
         def _run():
             try:
@@ -916,7 +935,7 @@ class MainWindow(QMainWindow):
         if not ip:
             return
         self._arp_btn.setEnabled(False)
-        self._probe_log("#fab387", f"ARP  → who has {ip}?  ...")
+        self._probe_log("#fab387", f"ARP  → who has {ip}?  iface={iface or 'auto'}  ...")
 
         def _run():
             try:
