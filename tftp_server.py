@@ -39,7 +39,7 @@ from typing import Optional, Dict, Tuple, List
 # ── dependency bootstrap ──────────────────────────────────────────────────────
 
 def _ensure_deps() -> None:
-    import importlib
+    import importlib.util
     import subprocess
     needed = [p for p in ("scapy", "rich") if not importlib.util.find_spec(p)]
     if needed:
